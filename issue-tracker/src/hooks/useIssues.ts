@@ -23,7 +23,7 @@ export const useIssues = (filters?: Partial<IssueFilters>) => {
       priorities: filters?.priorities ?? defaultFilters.priorities,
     };
 
-    if (filters?.showOnlyOpen) {
+    if (filters?.showOnlyOpen && !filters?.showArchived) {
       newFilters.statuses = ['New', 'In Progress', 'Awaiting Customer'];
     }
     newFilters.showArchived = filters?.showArchived ?? false;

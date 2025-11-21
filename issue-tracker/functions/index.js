@@ -2,11 +2,31 @@
 // A comment to force redeployment
 // A comment to force redeployment
 const { onDocumentCreated, onDocumentUpdated } = require("firebase-functions/v2/firestore");
+const { defineString } = require("firebase-functions/params");
 const admin = require("firebase-admin");
 const nodemailer = require("nodemailer");
 
 admin.initializeApp();
 const db = admin.firestore();
+
+// Define email config parameters
+const emailHost = defineString("EMAIL_HOST");
+const emailPort = defineString("EMAIL_PORT");
+const emailUser = defineString("EMAIL_USER");
+const emailPass = defineString("EMAIL_PASS");
+
+// Helper function to create mail transporter
+function createMailTransport() {
+  return nodemailer.createTransport({
+    host: emailHost.value(),
+    port: parseInt(emailPort.value()),
+    secure: false, // Use STARTTLS
+    auth: {
+      user: emailUser.value(),
+      pass: emailPass.value(),
+    },
+  });
+}
 
 // Hardcoded ASSIGNABLE_USERS for Cloud Functions. In a real app, this might be fetched from Firestore or a config.
 const ASSIGNABLE_USERS = [
@@ -39,15 +59,7 @@ function getUserEmail(userName) {
 exports.sendEmailOnNewIssue = onDocumentCreated(
   "issues/{issueId}",
   async (event) => {
-    const mailTransport = nodemailer.createTransport({
-      host: process.env.EMAIL_HOST,
-      port: process.env.EMAIL_PORT,
-      secure: false, // Use 'true' if your SMTP server uses SSL/TLS (e.g., 465), 'false' for STARTTLS (e.g., 587)
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
-      },
-    });
+    const mailTransport = createMailTransport();
 
     const snap = event.data;
     if (!snap) {
@@ -61,7 +73,7 @@ exports.sendEmailOnNewIssue = onDocumentCreated(
     const reporterEmail = getUserEmail(issue.reporter);
 
     const mailOptions = {
-      from: process.env.EMAIL_USER, // Sender address
+      from: emailUser.value(), // Sender address
       subject: `New Issue Created: ${issue.description.substring(0, 50)}...`,
       html: `
         <p>A new issue has been created:</p>
@@ -105,15 +117,7 @@ exports.sendEmailOnAssigneeChange = onDocumentUpdated(
   "issues/{issueId}",
   async (event) => {
     console.log("onDocumentUpdated triggered");
-    const mailTransport = nodemailer.createTransport({
-      host: process.env.EMAIL_HOST,
-      port: process.env.EMAIL_PORT,
-      secure: false, // Use 'true' if your SMTP server uses SSL/TLS (e.g., 465), 'false' for STARTTLS (e.g., 587)
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
-      },
-    });
+    const mailTransport = createMailTransport();
 
     const oldIssue = event.data.before.data();
     const newIssue = event.data.after.data();
@@ -130,7 +134,7 @@ exports.sendEmailOnAssigneeChange = onDocumentUpdated(
 
       if (newAssigneeEmail) {
         const mailOptions = {
-          from: process.env.EMAIL_USER, // Sender address
+          from: emailUser.value(), // Sender address
           to: newAssigneeEmail,
           subject: `Issue Assignment Changed: ${newIssue.description.substring(0, 50)}...`,
           html: `
@@ -153,6 +157,66 @@ exports.sendEmailOnAssigneeChange = onDocumentUpdated(
       }
     } else {
       console.log("Assignee has not changed");
+    }
+
+    return null;
+  });
+
+// Cloud Function to send email on status change
+exports.sendEmailOnStatusChange = onDocumentUpdated(
+  "issues/{issueId}",
+  async (event) => {
+    console.log("Status change function triggered");
+    const mailTransport = createMailTransport();
+
+    const oldIssue = event.data.before.data();
+    const newIssue = event.data.after.data();
+    const issueId = event.params.issueId;
+    const issueLink = `https://issuetracker-87429.web.app/dashboard?issueId=${issueId}`;
+
+    // Check if status has changed (and not assignee to avoid duplicate emails)
+    if (oldIssue.status !== newIssue.status && oldIssue.assignee === newIssue.assignee) {
+      console.log(`Status changed from ${oldIssue.status} to ${newIssue.status}`);
+
+      const assigneeEmail = getUserEmail(newIssue.assignee);
+      const reporterEmail = getUserEmail(newIssue.reporter);
+
+      const recipientEmails = [];
+      if (assigneeEmail) recipientEmails.push(assigneeEmail);
+      if (reporterEmail && reporterEmail !== assigneeEmail) {
+        recipientEmails.push(reporterEmail);
+      }
+
+      if (recipientEmails.length > 0) {
+        const mailOptions = {
+          from: emailUser.value(),
+          to: recipientEmails.join(', '),
+          subject: `Issue Status Changed: ${newIssue.description.substring(0, 50)}...`,
+          html: `
+            <p><strong>Issue Status Update</strong></p>
+            <p><strong>Description:</strong> ${newIssue.description}</p>
+            <p><strong>Old Status:</strong> ${oldIssue.status}</p>
+            <p><strong>New Status:</strong> ${newIssue.status}</p>
+            <p><strong>Priority:</strong> ${newIssue.priority}</p>
+            <p><strong>Assignee:</strong> ${newIssue.assignee || 'Unassigned'}</p>
+            <p><strong>Reporter:</strong> ${newIssue.reporter}</p>
+            <p>View issue: <a href="${issueLink}">${issueLink}</a></p>
+          `,
+        };
+
+        try {
+          await mailTransport.sendMail(mailOptions);
+          console.log(`Status change email sent for issue ${issueId} to ${recipientEmails.join(', ')}`);
+        } catch (error) {
+          console.error(`Error sending status change email for issue ${issueId}:`, error);
+        }
+      } else {
+        console.log(`No valid recipients for status change on issue ${issueId}`);
+      }
+    } else if (oldIssue.status === newIssue.status) {
+      console.log("Status has not changed");
+    } else {
+      console.log("Status and assignee both changed, only assignee email will be sent");
     }
 
     return null;
